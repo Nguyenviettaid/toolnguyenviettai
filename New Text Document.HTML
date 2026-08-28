@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Đọc Bản Vẽ & Tự Động Xuất G-Code</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f4f6f9; padding: 20px; color: #333; }
+        .container { max-width: 750px; margin: 0 auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h2 { color: #0056b3; }
+        .form-group { margin-bottom: 15px; }
+        label { font-weight: bold; display: block; margin-bottom: 5px; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { background: #28a745; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 4px; cursor: pointer; width: 100%; }
+        button:hover { background: #218838; }
+        #output { width: 100%; height: 350px; font-family: monospace; background: #1e1e1e; color: #00ff66; padding: 15px; border-radius: 4px; margin-top: 15px; white-space: pre-wrap; overflow-y: auto; box-sizing: border-box; }
+        .img-preview { max-width: 250px; margin-top: 10px; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h2>AI Đọc Bản Vẽ & Tự Động Xuất G-Code</h2>
+    <p>Bỏ ảnh bản vẽ CNC vào, AI sẽ đọc kích thước và xuất sườn G-code chuẩn.</p>
+    
+    <div class="form-group">
+        <label>Nhập Key Kích Hoạt Tool:</label>
+        <input type="text" id="appKey" placeholder="Nhập Key (VD: KEY-01)..." />
+    </div>
+
+    <div class="form-group">
+        <label>Chọn ảnh bản vẽ:</label>
+        <input type="file" id="imageInput" accept="image/*" onchange="previewImage(event)" />
+        <br>
+        <img id="preview" class="img-preview" style="display:none;" />
+    </div>
+
+    <button id="btnRun">🚀 Phân Tích & Tạo G-Code</button>
+
+    <h3>Kết Quả G-Code:</h3>
+    <pre id="output">Chờ bạn nhập Key và chọn ảnh...</pre>
+</div>
+
+<script>
+// Thông số Firebase
+const FIREBASE_PROJECT_ID = "code-a1f55";
+const FIREBASE_API_KEY = "AIzaSyCVxIKT9pZbcL5VoGwfFQNu6Mo_aplnGx8";
+
+// Key API Gemini của bạn
+const GEMINI_API_KEY = "AQ.Ab8RN6L2VXttkVsiz2GbTqYcy6YdeFw2uaSkpwBlu4zD87XosA";
+
+function getDeviceId() {
+    let devId = localStorage.getItem("my_tool_device_id");
+    if (!devId) {
+        devId = "DEV-" + Math.random().toString(36).substring(2, 11) + "-" + Date.now();
+        localStorage.setItem("my_tool_device_id", devId);
+    }
+    return devId;
+}
+
+function previewImage(event) {
+    const reader = new FileReader();
+    reader.onload = function(){
+        const output = document.getElementById('preview');
+        output.src = reader.result;
+        output.style.display = 'block';
+    };
+    if (event.target.files && event.target.files[0]) {
+        reader.readAsDataURL(event.target.files[0]);
+    }
+}
+
+async function validateLicense(userKey) {
+    const deviceId = getDeviceId();
+    const url = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/licenses/${userKey}?key=${FIREBASE_API_KEY}`;
+    
+    const res = await fetch(url);
+    if (res.status === 404) {
+        throw new Error("Key '" + userKey + "' không tồn tại trên hệ thống Firebase!");
+    }
+    if (!res.ok) {
+        throw new Error("Lỗi kết nối Firebase (" + res.status + ")");
+    }
+
+    const data = await res.json();
+    const fields = data.fields || {};
+    const registeredDeviceId = fields.deviceId ? fields.deviceId.stringValue : "";
+
+    if (!registeredDeviceId) {
+        const updateUrl = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/licenses/${userKey}?updateMask.fieldPaths=deviceId&key=${FIREBASE_API_KEY}`;
+        await fetch(updateUrl, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fields: {
+                    deviceId: { stringValue: deviceId }
+                }
+            })
+        });
+        return true;
+    }
+
+    if (registeredDeviceId !== deviceId) {
+        throw new Error("Key này đã được sử dụng trên một máy tính khác!");
+    }
+
+    return true;
+}
+
+document.getElementById('btnRun').addEventListener('click', async () => {
+    const userKey = document.getElementById('appKey').value.trim();
+    const fileInput = document.getElementById('imageInput');
+    const outputElem = document.getElementById('output');
+
+    if (!userKey) { alert("Vui lòng nhập Key kích hoạt!"); return; }
+    if (!fileInput.files.length) { alert("Vui lòng chọn ảnh bản vẽ!"); return; }
+
+    outputElem.innerText = "⏳ Đang kiểm tra bản quyền Key...";
+
+    try {
+        await validateLicense(userKey);
+
+        outputElem.innerText = "✅ Key hợp lệ! Đang gửi ảnh sang AI phân tích...";
+
+        const file = fileInput.files[0];
+        const base64Data = await toBase64(file);
+        const base64Clean = base64Data.split(',')[1];
+
+        const promptText = `Hãy đọc kích thước trên bản vẽ CNC Phay này và viết G-code chuẩn xác.
+BẮT BUỘC QUY TẮC:
+1. Đối với các cung tròn hoặc góc bo bán kính R, phải sử dụng lệnh nội suy tròn kết hợp thông số CR= (Ví dụ: G02 X... Y... CR=10 hoặc G03 X... Y... CR=10). KHÔNG dùng I, J.
+2. Viết theo cấu trúc sườn chuẩn:
+N00 G54 G90 T01 S500 M03
+N05 G00 X... Y...
+N10 G01 Z-2 F50
+... (các đường thẳng G01 và cung tròn G02/G03 có CR=)
+N... G00 Z20
+N... M05
+N... M02
+
+Chỉ trả về duy nhất đoạn code G-code, không viết lời giải thích dông dài.`;
+
+        // Đã cập nhật chính xác sang model gemini-3.6-flash
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_API_KEY}`;
+        
+        const payload = {
+            contents: [{
+                parts: [
+                    { text: promptText },
+                    { inline_data: { mime_type: file.type, data: base64Clean } }
+                ]
+            }]
+        };
+
+        const aiRes = await fetch(geminiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        const aiData = await aiRes.json();
+
+        if (aiData.error) {
+            throw new Error(aiData.error.message);
+        }
+
+        const gcodeText = aiData.candidates[0].content.parts[0].text;
+        outputElem.innerText = gcodeText;
+
+    } catch (err) {
+        outputElem.innerText = "❌ LỖI KHỞI CHẠY:\n" + err.message;
+    }
+});
+
+function toBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = error => reject(error);
+    });
+}
+</script>
+</body>
+</html>
